@@ -1,0 +1,144 @@
+# ============================================================================
+# 本番環境(AWS EC2, t3.micro / t4g.micro, 1GB RAM 前提)用の Docker Compose 設定。
+#
+# 使い方(必ず --env-file .env.production を付けること):
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d app libretranslate
+#   (DB もこのホストで動かす場合は db サービスも含めて起動する。詳細は下記参照)
+#
+# 注意: このファイル名は `.env`(Compose の既定の変数展開ソース)ではなく
+# `.env.production` なので、ports の `${APP_PORT:-80}` のような docker-compose
+# 側の変数展開を効かせるには、コマンド実行時に必ず `--env-file .env.production`
+# を明示する必要がある(deploy/deploy.sh・deploy/sync-anilist-cron.sh も同様)。
+#
+# --- サービス構成 ---
+#   app            : Next.js 本体(standalone サーバー)
+#   db             : PostgreSQL(profile: local-db。RDS 移行時はこのサービスを
+#                    起動せず、.env.production の DATABASE_URL を RDS の
+#                    エンドポイントに向けるだけでよい。アプリ側のコード変更は不要)
+#   libretranslate : レビュー自動翻訳用の翻訳エンジン
+#   migrate        : `prisma migrate deploy` を実行するワンショットジョブ(profile: tools)
+#   anilist-sync   : AniList バッチ同期を実行するワンショットジョブ(profile: tools。
+#                    cron から定期実行する。deploy/crontab.example 参照)
+#   ranking-snapshot : 日次ランキングスナップショット保存を実行するワンショットジョブ
+#                    (profile: tools。cron から定期実行する。deploy/crontab.example 参照)
+#
+# --- DB を RDS に移行する場合 ---
+#   1. db サービスを起動対象から外す(`--profile local-db` を付けずに up する)
+#   2. .env.production の DATABASE_URL を RDS のエンドポイントに書き換える
+#   3. app/migrate/anilist-sync はコード変更なしにそのまま RDS に接続できる
+#
+# 注意: 開発用 docker-compose.yml と同じディレクトリで実行するため、Compose の
+# プロジェクト名(コンテナ/ボリューム/ネットワーク名の接頭辞)を明示的に分けている。
+# これが無いとディレクトリ名から自動生成されるプロジェクト名が両方とも同じになり、
+# 開発用 DB ボリュームと本番用 DB ボリュームが衝突してしまう。
+# ============================================================================
+
+name: kimi-no-anime-wa-prod
+
+services:
+  # --- Next.js アプリ本体 ---
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: kimi-no-anime-wa-app
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    ports:
+      - '${APP_PORT:-80}:3000'
+    depends_on:
+      - libretranslate
+    # t3.micro/t4g.micro(1GB RAM)全体でメモリを食い潰さないよう上限を設定する。
+    mem_limit: 384m
+    mem_reservation: 192m
+
+  # --- PostgreSQL(このホストで DB も動かす場合のみ使用) ---
+  # RDS に移行したら `--profile local-db` を付けずに起動すればこのサービスは立ち上がらない。
+  db:
+    image: postgres:16-alpine
+    # 開発用 docker-compose.yml の db(container_name: kimi-no-anime-wa-db)と
+    # 同じホストで同時に動かしてもコンテナ名が衝突しないよう区別する。
+    container_name: kimi-no-anime-wa-prod-db
+    restart: unless-stopped
+    profiles: ['local-db']
+    # POSTGRES_USER/PASSWORD/DB は env_file(.env.production)からコンテナの
+    # 実行時環境変数として渡す(postgres 公式イメージが直接読む)。
+    # `environment: KEY: ${VAR}` のような docker-compose 側の変数展開は、
+    # 既定の `.env` ファイルからしか値を拾えず `.env.production` では効かないため
+    # あえて使わない(healthcheck も同じ理由でコンテナ内シェル展開の `$$VAR` を使う)。
+    env_file:
+      - .env.production
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 256m
+    mem_reservation: 128m
+
+  # --- LibreTranslate(レビュー自動翻訳) ---
+  libretranslate:
+    image: libretranslate/libretranslate:latest
+    container_name: kimi-no-anime-wa-libretranslate
+    restart: unless-stopped
+    environment:
+      # 1GB RAM のインスタンスでは全言語モデルを読み込むと確実にメモリ不足になるため、
+      # 実際に使う言語(日本語・韓国語。英語は ja<->ko 翻訳時の中継言語として必要)
+      # だけに絞り込む。
+      - LT_LOAD_ONLY=en,ja,ko
+      # Web UI(/) は使わず API(/translate)のみ叩く運用のため無効化してフットプリントを削減。
+      - LT_DISABLE_WEB_UI=true
+    ports:
+      - '${LIBRETRANSLATE_PORT:-5000}:5000'
+    volumes:
+      # 翻訳モデルのダウンロードキャッシュを永続化し、コンテナ再作成のたびに
+      # 再ダウンロードが走らないようにする。
+      - libretranslate_models:/home/libretranslate/.local
+    mem_limit: 384m
+    mem_reservation: 256m
+
+  # --- マイグレーション実行用(ワンショット) ---
+  # 実行例: docker compose -f docker-compose.prod.yml --env-file .env.production --profile tools run --rm migrate
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: batch
+    profiles: ['tools']
+    env_file:
+      - .env.production
+    command: ['npm', 'run', 'db:deploy']
+
+  # --- AniList バッチ同期実行用(ワンショット。cron から呼び出す) ---
+  # 実行例: docker compose -f docker-compose.prod.yml --env-file .env.production --profile tools run --rm anilist-sync
+  anilist-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: batch
+    profiles: ['tools']
+    env_file:
+      - .env.production
+    command: ['npm', 'run', 'sync:anilist']
+    mem_limit: 256m
+
+  # --- 日次ランキングスナップショット保存実行用(ワンショット。cron から呼び出す) ---
+  # 実行例: docker compose -f docker-compose.prod.yml --env-file .env.production --profile tools run --rm ranking-snapshot
+  ranking-snapshot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: batch
+    profiles: ['tools']
+    env_file:
+      - .env.production
+    command: ['npm', 'run', 'snapshot:ranking']
+    mem_limit: 256m
+
+volumes:
+  postgres_data:
+  libretranslate_models:

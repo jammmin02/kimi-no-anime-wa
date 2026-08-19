@@ -1,0 +1,421 @@
+// 「君のアニメは」データベーススキーマ定義(Phase 0 / P0-2)。
+//
+// 参照: `implementation_prompts_ko.md` の共通規則・ランキング規則、`plan_ko.md` の 4.1 節。
+// - ランキングは自サービスのレビュー/評価データのみで並び替える。AniList の popularity /
+//   averageScore / trending は「参考情報」としてのみ保存し、並び替えの基準には絶対に使わない。
+// - ソーシャルログインは実装しない(メールアドレス+パスワードの自前認証のみ)。
+// - まだ API ルートや画面は作らず、スキーマとマイグレーションのみを用意する段階(P0-2)。
+//
+// Prisma 7 では接続文字列(url)をスキーマファイルではなく `prisma.config.ts` 側で
+// 管理する方式に変更されたため、datasource ブロックには provider のみを記述する。
+// 実際の DATABASE_URL の参照先は `prisma.config.ts` を参照。
+
+generator client {
+  provider               = "prisma-client"
+  // node_modules 直下ではなく server/db 配下に生成し、既存のフォルダ構成
+  // (server/db = DB クライアント置き場)にそのまま乗せる。
+  output                 = "../server/db/generated/prisma"
+  moduleFormat           = "esm"
+  generatedFileExtension = "ts"
+  // importFileExtension は generatedFileExtension と揃えて "ts" にする。
+  // "js" のままだと生成コード内の import 指定子が実体と異なる拡張子
+  // (`./enums.js` なのに実ファイルは `./enums.ts`)になり、tsx 等の
+  // ローダーでは解決できても Next.js の Turbopack バンドラーでは
+  // 解決できず "Module not found" になる(tsconfig.json の
+  // allowImportingTsExtensions は「.ts を指定子にそのまま書く」ための
+  // フラグであり、「.js 指定子を .ts に読み替える」機能ではないため)。
+  importFileExtension    = "ts"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =========================================================================
+// Enum 定義
+// =========================================================================
+
+/// 作品の種別(アニメ / マンガ)。
+enum WorkType {
+  ANIME
+  MANGA
+}
+
+/// AniList の countryOfOrigin をそのまま保持する。
+/// マンガランキングの KR/JP フィルタに使用する(3.2 参照)。アニメはほぼ全て JP になるため、
+/// アニメ側の国別比較には使わない(Phase 3 で自社会員の「国」フィールドに基づく比較に置き換え予定)。
+enum WorkCountry {
+  JP
+  KR
+  CN
+  TW
+  OTHER
+}
+
+/// 放送/連載シーズン。
+enum Season {
+  WINTER
+  SPRING
+  SUMMER
+  FALL
+}
+
+/// AniList の MediaRelation をそのまま保持する(原作-アニメ-続編-外伝などの接続関係)。
+/// P1-3(原作-アニメシリーズ接続機能)でそのまま利用する想定。
+enum WorkRelationType {
+  ADAPTATION
+  PREQUEL
+  SEQUEL
+  PARENT
+  SIDE_STORY
+  CHARACTER
+  SUMMARY
+  ALTERNATIVE
+  SPIN_OFF
+  OTHER
+  SOURCE
+  COMPILATION
+  CONTAINS
+}
+
+/// UI の既定表示言語。優先市場が日本語ユーザーのため既定値は JA。
+enum PreferredLanguage {
+  JA
+  KO
+}
+
+/// 保管庫(お気に入り/視聴・閲読状態)のステータス。
+enum LibraryStatus {
+  PLANNING // お気に入り登録・視聴/閲読予定
+  WATCHING // 視聴中・閲読中
+  COMPLETED // 完了
+  ON_HOLD // 中断(保留)
+  DROPPED // 視聴/閲読中止
+}
+
+/// レビュー通報の理由(P1-4)。
+enum ReportReason {
+  SPOILER // ネタバレが隠されていない
+  ABUSE // 誹謗中傷・嫌がらせ
+  SPAM // スパム・宣伝
+  OFF_TOPIC // 作品と関係のない内容
+  OTHER // その他
+}
+
+/// レビュー通報の処理状況。運営者による確認・対応は Phase 1 の管理者ページ項目で
+/// 扱う想定のため、現段階ではデータを溜めるだけで PENDING のまま残る。
+enum ReportStatus {
+  PENDING
+  RESOLVED
+  DISMISSED
+}
+
+/// 星評価(1〜10 スケール)の区間(P2-3: 別点区間別 AI レビュー要約)。
+/// 区間の境界値は lib/constants/reviewSummaries.ts の HIGH_RATING_BAND_MIN /
+/// LOW_RATING_BAND_MAX を参照(スキーマ側では区分名のみを保持する)。
+enum RatingBand {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+// =========================================================================
+// 作品マスターテーブル
+// =========================================================================
+
+/// AniList から同期した作品メタデータを保持するマスターテーブル。
+/// P0-3 のバッチ同期スクリプトが定期的にこのテーブルを更新する想定。
+model Work {
+  id        Int      @id @default(autoincrement())
+  /// AniList 側の作品 ID。バッチ同期時の突き合わせキーとして使用する。
+  anilistId Int      @unique @map("anilist_id")
+  type      WorkType
+
+  // --- 多言語タイトル(AniList の title フィールドに対応) ---
+  titleRomaji  String? @map("title_romaji")
+  titleEnglish String? @map("title_english")
+  titleNative  String? @map("title_native")
+  /// AniList は韓国語の公式タイトルを提供しないため、現時点では未使用。
+  /// 将来、手動入力またはクラウドソーシング編集機能(Phase 3)で埋める余地として残しておく。
+  titleKorean  String? @map("title_korean")
+
+  genres          String[]
+  /// マンガの韓国/日本フィルタや、アニメの参考表示に使用する原産国。
+  countryOfOrigin WorkCountry @map("country_of_origin")
+
+  season     Season?
+  seasonYear Int?    @map("season_year")
+
+  episodes Int?
+  chapters Int?
+  volumes  Int?
+
+  /// AniList のカバー画像を直接 hotlink する(現段階では S3 キャッシュ化しない)。
+  coverImageUrl String? @map("cover_image_url")
+
+  // --- AniList 参考指標 ---
+  // 以下 3 つのフィールドは、詳細ページに「参考情報」として表示するためだけに使用する。
+  // 自サービスのランキング並び替えには絶対に使用しないこと(implementation_prompts_ko.md 共通規則参照)。
+  popularity   Int? @map("popularity")
+  averageScore Int? @map("average_score")
+  trending     Int? @map("trending")
+
+  tags                  WorkTag[]
+  sourceRelations       WorkRelation[]         @relation("SourceWorkRelations")
+  targetRelations       WorkRelation[]         @relation("TargetWorkRelations")
+  reviews               Review[]
+  reviewSummaries       ReviewSummary[]
+  libraryEntries        LibraryEntry[]
+  recommendationReasons RecommendationReason[]
+  rankingSnapshots      RankingSnapshot[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([type])
+  @@index([countryOfOrigin])
+  @@index([season, seasonYear])
+  @@map("works")
+}
+
+/// 作品ごとの AniList タグと、その連関度(%)。
+/// 取り好みキーワードとのマッチング(P1-6 のコンテンツベース推薦)に使用する。
+model WorkTag {
+  id     Int  @id @default(autoincrement())
+  workId Int  @map("work_id")
+  work   Work @relation(fields: [workId], references: [id], onDelete: Cascade)
+
+  name String
+  /// AniList の tag.rank(連関度、0〜100 の%値)をそのまま保存する。
+  rank Int
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([workId, name])
+  @@index([name])
+  @@map("work_tags")
+}
+
+/// 原作-アニメ-続編-外伝などの接続関係(AniList の relations フィールド由来)。
+/// P1-3 のシリーズ接続 UI がこのテーブルをそのまま参照する想定。
+model WorkRelation {
+  id Int @id @default(autoincrement())
+
+  sourceWorkId Int  @map("source_work_id")
+  sourceWork   Work @relation("SourceWorkRelations", fields: [sourceWorkId], references: [id], onDelete: Cascade)
+
+  /// 関係先の AniList ID。同期のタイミングによっては、関係先の作品がまだ自前 DB に
+  /// 存在しない場合があるため、AniList ID は必ず保存しておく。
+  targetAnilistId Int   @map("target_anilist_id")
+  /// 関係先が同期済みであれば自動的に紐づく(未同期の間は null のまま)。
+  /// 対象作品が削除された場合は SetNull にして関係レコード自体は残す。
+  targetWorkId    Int?  @map("target_work_id")
+  targetWork      Work? @relation("TargetWorkRelations", fields: [targetWorkId], references: [id], onDelete: SetNull)
+
+  relationType WorkRelationType @map("relation_type")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([sourceWorkId, targetAnilistId, relationType])
+  @@index([targetAnilistId])
+  @@map("work_relations")
+}
+
+// =========================================================================
+// ユーザーテーブル
+// =========================================================================
+
+/// メールアドレス+パスワード方式の自前認証ユーザー。ソーシャルログインは実装しない。
+model User {
+  id           Int    @id @default(autoincrement())
+  email        String @unique
+  /// bcrypt でハッシュ化したパスワード。平文パスワードは絶対に保存しない。
+  passwordHash String @map("password_hash")
+  nickname     String
+
+  preferredLanguage PreferredLanguage @default(JA) @map("preferred_language")
+  /// 好み(取り好み)キーワード。AniList の tags と突き合わせて推薦に利用する(P1-6)。
+  tasteKeywords     String[]          @map("taste_keywords")
+
+  /// Phase 3(自社会員の「国」フィールドに基づく実質人気比較)で使用する想定の任意入力項目。
+  /// 現段階では収集するのみで、機能としては未使用。
+  country String?
+
+  reviews               Review[]
+  reviewComments        ReviewComment[]
+  reviewReports         ReviewReport[]
+  libraryEntries        LibraryEntry[]
+  recommendationReasons RecommendationReason[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+// =========================================================================
+// レビュー / 評価テーブル
+// =========================================================================
+
+/// 作品ごとのレビュー・星評価。
+model Review {
+  id     Int  @id @default(autoincrement())
+  workId Int  @map("work_id")
+  work   Work @relation(fields: [workId], references: [id], onDelete: Cascade)
+  userId Int  @map("user_id")
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// 評価スケールは 1〜10(UI 上で★5段階として rating/2 のように換算表示する想定)。
+  rating    Int
+  body      String
+  /// ネタバレを含むレビューかどうか。true の場合、UI 側で本文を隠して表示する(P1-4)。
+  isSpoiler Boolean @default(false) @map("is_spoiler")
+
+  comments ReviewComment[]
+  reports  ReviewReport[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// 1 ユーザー・1 作品につきレビューは 1 件のみ(再投稿は更新として扱う)。
+  @@unique([workId, userId])
+  @@index([workId])
+  @@map("reviews")
+}
+
+/// レビューへのコメント(P1-4)。運営者による削除・非表示などの管理機能は
+/// Phase 1 の管理者ページ項目で扱う想定のため、今はデータを溜めるだけにする。
+model ReviewComment {
+  id       Int    @id @default(autoincrement())
+  reviewId Int    @map("review_id")
+  review   Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  userId   Int    @map("user_id")
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  body String
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([reviewId])
+  @@map("review_comments")
+}
+
+/// レビューへの通報(P1-4)。通報内容の確認・対応(承認/却下)は Phase 1 の
+/// 管理者ページ項目で扱う想定のため、現段階では PENDING のまま溜めるだけにする。
+model ReviewReport {
+  id         Int    @id @default(autoincrement())
+  reviewId   Int    @map("review_id")
+  review     Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  reporterId Int    @map("reporter_id")
+  reporter   User   @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+
+  reason ReportReason
+  status ReportStatus @default(PENDING)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  /// 同じユーザーが同じレビューを何度も通報できないようにする。
+  @@unique([reviewId, reporterId])
+  @@index([reviewId])
+  @@index([status])
+  @@map("review_reports")
+}
+
+/// 作品 × 星評価区間ごとにキャッシュする AI レビュー要約(P2-3)。
+/// Claude API の呼び出しにはコストとレイテンシがかかるため、区間ごとのレビュー件数が
+/// 前回生成時から変化した場合にのみ再生成する(server/services/reviewSummaries.ts 参照)。
+model ReviewSummary {
+  id         Int        @id @default(autoincrement())
+  workId     Int        @map("work_id")
+  work       Work       @relation(fields: [workId], references: [id], onDelete: Cascade)
+  ratingBand RatingBand @map("rating_band")
+
+  summary String
+
+  /// この要約を生成した時点での、この作品・この区間のレビュー件数。
+  /// 次回参照時にこの値と実際の件数を比較し、変化していれば再生成する
+  /// (再生成要否を判定する唯一の材料。レビュー本文の編集だけでは再生成されない)。
+  reviewCount Int @map("review_count")
+
+  generatedAt DateTime @default(now()) @map("generated_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  /// 1 作品・1 区間につき要約は 1 件のみ(再生成は更新として扱う)。
+  @@unique([workId, ratingBand])
+  @@map("review_summaries")
+}
+
+/// ユーザー × 作品ごとにキャッシュする AI おすすめ理由(P2-4)。
+/// Claude API の呼び出しにはコストとレイテンシがかかるため、同じユーザー・作品の
+/// 組み合わせでは、おすすめ計算の入力(一致キーワード・一致タグ・自体レビューの
+/// 平均評価)が生成時から変わらない限り再利用する(server/services/recommendationReasons.ts 参照)。
+model RecommendationReason {
+  id     Int  @id @default(autoincrement())
+  userId Int  @map("user_id")
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workId Int  @map("work_id")
+  work   Work @relation(fields: [workId], references: [id], onDelete: Cascade)
+
+  /// 生成時点の入力(一致キーワード・一致タグ・平均評価)を正規化した文字列。
+  /// 次回参照時にこの値と現在の入力を比較し、変化していれば再生成する
+  /// (再生成要否を判定する唯一の材料)。
+  inputSignature String @map("input_signature")
+  /// Claude が生成した、1〜2 文の自然な日本語のおすすめ理由文。
+  reason         String
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// 1 ユーザー・1 作品につきキャッシュは 1 件のみ(再生成は更新として扱う)。
+  @@unique([userId, workId])
+  @@map("recommendation_reasons")
+}
+
+/// 日次ランキングスナップショット(P2-6)。マンガ/アニメ各々の、当サービスの
+/// レビュー基準ランキング(順位付け対象になった作品のみ。最小レビュー数未満で
+/// 「情報不足」だった作品はそもそも順位が無いため保存しない)を 1 日 1 回保存する。
+/// 前日比の順位変動表示は server/services/rankingChanges.ts が、このテーブルと
+/// 現在のライブな順位を突き合わせて計算する
+/// (保存側は server/services/rankingSnapshot.ts、実行は scripts/snapshot-ranking.mts)。
+model RankingSnapshot {
+  id     Int      @id @default(autoincrement())
+  workId Int      @map("work_id")
+  work   Work     @relation(fields: [workId], references: [id], onDelete: Cascade)
+  /// Work.type から取得可能だが、日付・種別だけで絞り込めるようここにも複製しておく。
+  type   WorkType
+
+  /// スナップショット対象日(時刻情報を持たない日付のみ)。
+  snapshotDate DateTime @map("snapshot_date") @db.Date
+  /// この日時点の順位(1 始まり)。
+  rank         Int
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  /// 同じ作品・同じ日のスナップショットは 1 件のみ(バッチの同日再実行は洗い替えとして扱う)。
+  @@unique([workId, snapshotDate])
+  @@index([type, snapshotDate])
+  @@map("ranking_snapshots")
+}
+
+// =========================================================================
+// 保管庫(お気に入り/視聴状態)テーブル
+// =========================================================================
+
+/// ユーザーごとの作品の視聴/閲読状態管理(お気に入り・視聴中・完了など)。
+model LibraryEntry {
+  id     Int  @id @default(autoincrement())
+  userId Int  @map("user_id")
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workId Int  @map("work_id")
+  work   Work @relation(fields: [workId], references: [id], onDelete: Cascade)
+
+  status LibraryStatus
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// 1 ユーザー・1 作品につき保管庫のステータスは 1 件のみ。
+  @@unique([userId, workId])
+  @@index([userId, status])
+  @@map("library_entries")
+}

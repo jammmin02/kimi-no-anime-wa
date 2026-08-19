@@ -1,0 +1,39 @@
+# ローカル開発用の Docker Compose 設定
+# 「君のアニメは」開発時に PostgreSQL を手軽に起動するためのもの。
+# 本番用(AWS EC2)の構成は P0-4 で別途 docker-compose.prod.yml 等として作成予定。
+
+services:
+  # --- PostgreSQL ---
+  # アプリ本体(Next.js)の DB。接続情報は .env の値を参照する。
+  # .env が未作成の場合に備えて、開発用のデフォルト値もフォールバックとして設定している。
+  db:
+    image: postgres:16-alpine
+    container_name: kimi-no-anime-wa-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kimi_dev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kimi_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-kimi_no_anime_wa}
+    ports:
+      # ホスト側のポートを変更したい場合は .env の POSTGRES_PORT を上書きする
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      # コンテナを再作成してもデータが消えないように名前付きボリュームへ永続化する
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U ${POSTGRES_USER:-kimi_dev} -d ${POSTGRES_DB:-kimi_no_anime_wa}',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # --- (今後追加予定) ---
+  # LibreTranslate や、AniList 同期バッチの定期実行コンテナは
+  # P0-4(AWS デプロイパイプライン構築)で本番構成として別途検討する。
+  # ローカル開発の現段階では PostgreSQL のみを Compose で管理する。
+
+volumes:
+  postgres_data:

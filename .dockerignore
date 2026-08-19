@@ -1,0 +1,16 @@
+node_modules
+.next
+out
+build
+.git
+.gitignore
+.env
+.env.*
+!.env.production.example
+!.env.example
+npm-debug.log*
+server/db/generated
+_to_delete
+*.md
+.vscode
+.idea

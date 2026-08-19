@@ -1,0 +1,35 @@
+# ============================================================================
+# EC2 への本番デプロイワークフロー(任意。使わない場合は deploy/deploy.sh を
+# EC2 上で直接手動実行すればよい)。
+#
+# 前提: リポジトリの Settings > Secrets and variables > Actions に以下を登録すること。
+#   EC2_HOST     : EC2 のパブリック IP またはドメイン
+#   EC2_USER     : SSH 接続ユーザー名(例: ec2-user, ubuntu)
+#   EC2_SSH_KEY  : SSH 接続用の秘密鍵(PEM 形式そのまま)
+#   EC2_APP_DIR  : EC2 上のリポジトリ配置パス(例: /opt/kimi-no-anime-wa)
+#
+# 動作: main ブランチへの push、または手動実行(workflow_dispatch)をトリガーに、
+# EC2 に SSH 接続して deploy/deploy.sh を実行するだけのシンプルな構成。
+# ビルド自体は EC2 上の docker compose build で行うため、コンテナレジストリは
+# 使用しない(小規模構成向けの簡易版)。
+# ============================================================================
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: EC2 に SSH 接続してデプロイスクリプトを実行する
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd "${{ secrets.EC2_APP_DIR }}"
+            bash deploy/deploy.sh

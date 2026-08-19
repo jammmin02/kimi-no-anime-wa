@@ -1,0 +1,20 @@
+@import 'tailwindcss';
+@import './theme.css';
+
+/*
+ * デザイントークン(色・タイポグラフィ・spacing・角丸・シャドウ)の定義は
+ * すべて ./theme.css に一元化している。ここには「トークンを実際に body 等の
+ * 要素へ適用する」最小限のグローバルスタイルだけを置く。
+ */
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+}
+
+/* フォーカスリング(キーボード操作時のみ表示。マウスクリックでは表示しない) */
+:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
+}

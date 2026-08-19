@@ -1,0 +1,22 @@
+# ============================================================================
+# 「君のアニメは」AniList バッチ同期用 crontab 設定例。
+#
+# 設置方法(EC2 上、対象ユーザーで):
+#   crontab -e
+#   (下の行を、実際の APP_DIR のパスに合わせて追記する)
+#
+# もしくは、このファイルをそのまま登録する場合:
+#   crontab deploy/crontab.example
+#   ※ その場合は先に APP_DIR のパスを実際の配置場所に書き換えること。
+# ============================================================================
+
+# 毎日 04:10(サーバーのタイムゾーン基準)に AniList バッチ同期を実行し、
+# 標準出力・エラー出力をログファイルに追記する。
+# ログのローテーションは deploy/logrotate.conf を /etc/logrotate.d/ に配置して行う。
+10 4 * * * APP_DIR=/opt/kimi-no-anime-wa /opt/kimi-no-anime-wa/deploy/sync-anilist-cron.sh >> /opt/kimi-no-anime-wa/logs/anilist-sync-cron.log 2>&1
+
+# 毎日 04:40(サーバーのタイムゾーン基準)に、当日時点のマンガ/アニメランキングの
+# スナップショットを保存する(P2-6。前日比の順位変動表示に使う)。
+# AniList 同期(04:10)の後に実行することで、その日の最新の作品データを反映した
+# 状態でランキングを計算させている。
+40 4 * * * APP_DIR=/opt/kimi-no-anime-wa /opt/kimi-no-anime-wa/deploy/snapshot-ranking-cron.sh >> /opt/kimi-no-anime-wa/logs/ranking-snapshot-cron.log 2>&1
