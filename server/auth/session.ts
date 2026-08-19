@@ -80,7 +80,9 @@ export async function setSessionCookie(user: AuthUser): Promise<void> {
   const cookieStore = await cookies();
   cookieStore.set(SESSION_COOKIE_NAME, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
+    // NODE_ENV ではなく実際の配信プロトコルで判定する(本番でも HTTPS 化前は
+    // Secure Cookie をブラウザが保存できず、ログイン状態が一切保持されなくなるため)。
+    secure: (process.env.NEXT_PUBLIC_APP_URL ?? '').startsWith('https://'),
     sameSite: 'lax',
     path: '/',
     maxAge: SESSION_MAX_AGE_SECONDS,
