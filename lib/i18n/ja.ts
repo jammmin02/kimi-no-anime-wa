@@ -344,7 +344,7 @@ export const ja = {
   },
   search: {
     // P2-1: Claude API を使った自然言語検索。
-    title: '自然言語検索',
+    title: '検索',
     description:
       '「復讐する成長型主人公が出てくる異世界物」のように、思いついた文章のまま検索できます。',
     formLabel: '検索キーワード',
